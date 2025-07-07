@@ -451,7 +451,7 @@ class PPOTrainer:
         self.model.cpu()
         # Save in .pth format (torch)
         torch.save(self.model.state_dict(), f"./models/{self.run_id}.pth")
-        print(f"Model saved to ./models/{self.run_id}.nn and .pth")
+        print(f"Model saved to ./models/{self.run_id}.pth")
 
     def close(self) -> None:
         """Terminates the trainer and all related processes."""

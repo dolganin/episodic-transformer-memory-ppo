@@ -20,6 +20,8 @@ class ActorCriticModel(nn.Module):
         super().__init__()
         self.hidden_size = config["hidden_layer_size"]
         self.memory_layer_size = config["transformer"]["embed_dim"]
+        self.svd_rank_frac = config["svd_rank_frac"]
+        print(f"SVD frac for experiment is {self.svd_rank_frac}")
         self.observation_space_shape = observation_space.shape
         self.max_episode_length = max_episode_length
 
@@ -68,6 +70,30 @@ class ActorCriticModel(nn.Module):
         self.value = nn.Linear(self.hidden_size, 1)
         nn.init.orthogonal_(self.value.weight, 1)
 
+    def svd_low_rank_safe(self, x: torch.Tensor,
+                          energy_frac: float = 1.0, max_try: int = 3) -> torch.Tensor:
+        orig_shape = x.shape                    # (..., D)
+        x_2d = x.reshape(-1, x.shape[-1])       # (M, D)   без батча
+    
+        for i in range(max_try):
+            try:
+                U, S, Vh = torch.linalg.svd(x_2d, full_matrices=False)
+                break
+            except RuntimeError:
+                if i == max_try - 1:
+                    return x
+                x_2d = x_2d.cpu().double()
+    
+        if energy_frac < 1.0:
+            energy = torch.cumsum(S ** 2, dim=-1) / (S ** 2).sum()
+            k = int((energy < energy_frac).sum() + 1)
+            U, S, Vh = U[:, :k], S[:k], Vh[:k, :]
+    
+        x_hat = (U * S.unsqueeze(-2)) @ Vh       # (M, D)
+        return x_hat.reshape(orig_shape)
+
+
+
     def forward(self, obs:torch.tensor, memory:torch.tensor, memory_mask:torch.tensor, memory_indices:torch.tensor):
         """Forward pass of the model
 
@@ -98,6 +124,10 @@ class ActorCriticModel(nn.Module):
         
         # Forward transformer blocks
         h, memory = self.transformer(h, memory, memory_mask, memory_indices)
+        if self.svd_rank_frac is not None:
+            approx = self.svd_low_rank_safe(memory, self.svd_rank_frac)
+            memory = approx + (memory - approx).detach()
+
 
         # Decouple policy from value
         # Feed hidden layer (policy)
