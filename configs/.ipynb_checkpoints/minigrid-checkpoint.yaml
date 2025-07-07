@@ -37,4 +37,5 @@ clip_range_schedule:
     max_decay_steps: 10000
 fps: 15
 video_every: 10
-svd_rank_frac: 0.25
+#svd_rank_frac: 1.0
+tt_rank_frac: 1.0

@@ -4,7 +4,7 @@ import torch
 from torch.distributions import Categorical
 from torch import nn
 from torch.nn import functional as F
-
+import tntorch as tn
 from transformer import Transformer
 
 class ActorCriticModel(nn.Module):
@@ -20,8 +20,14 @@ class ActorCriticModel(nn.Module):
         super().__init__()
         self.hidden_size = config["hidden_layer_size"]
         self.memory_layer_size = config["transformer"]["embed_dim"]
-        self.svd_rank_frac = config["svd_rank_frac"]
-        print(f"SVD frac for experiment is {self.svd_rank_frac}")
+        self.svd_rank_frac = config.get("svd_rank_frac", None)
+        self.tt_rank_frac = config.get("tt_rank_frac", None)
+
+        if self.svd_rank_frac:
+            print(f"SVD frac for experiment is {self.svd_rank_frac}")
+        if self.tt_rank_frac:
+            print(f"TT frac for experiment is {self.tt_rank_frac}")
+            
         self.observation_space_shape = observation_space.shape
         self.max_episode_length = max_episode_length
 
@@ -124,9 +130,18 @@ class ActorCriticModel(nn.Module):
         
         # Forward transformer blocks
         h, memory = self.transformer(h, memory, memory_mask, memory_indices)
+
         if self.svd_rank_frac is not None:
             approx = self.svd_low_rank_safe(memory, self.svd_rank_frac)
             memory = approx + (memory - approx).detach()
+        
+        elif self.tt_rank is not None:
+            # memory: (B, L, blocks, D) → TT по последним осям
+            shape = memory.shape
+            mem_tt = tn.Tensor(memory.reshape(-1, shape[-2], shape[-1]), ranks_tt=self.tt_rank)
+            approx = mem_tt.full().reshape_as(memory)
+            memory = approx + (memory - approx).detach()
+
 
 
         # Decouple policy from value
