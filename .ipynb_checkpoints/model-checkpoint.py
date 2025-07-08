@@ -8,72 +8,61 @@ import tntorch as tn
 from transformer import Transformer
 
 class ActorCriticModel(nn.Module):
-    def __init__(self, config, observation_space, action_space_shape, max_episode_length):
-        """Model setup
-
-        Arguments:
-            config {dict} -- Configuration and hyperparameters of the environment, trainer and model.
-            observation_space {box} -- Properties of the agent's observation space
-            action_space_shape {tuple} -- Dimensions of the action space
-            max_episode_length {int} -- The maximum number of steps in an episode
-        """
+    def __init__(self, config, observation_space, action_space_shape, max_episode_length, device):
         super().__init__()
-        self.hidden_size = config["hidden_layer_size"]
-        self.memory_layer_size = config["transformer"]["embed_dim"]
+
+        # ─── experiment flags ──────────────────────────────────────────
         self.svd_rank_frac = config.get("svd_rank_frac", None)
-        self.tt_rank_frac = config.get("tt_rank_frac", None)
+        self.tt_rank_frac  = config.get("tt_rank_frac",  None)
+        self.gauss_filter  = config.get("gauss_filter", False)
+        self.laplace_filter = config.get("laplace_filter", False)
 
-        if self.svd_rank_frac:
-            print(f"SVD frac for experiment is {self.svd_rank_frac}")
-        if self.tt_rank_frac:
-            print(f"TT frac for experiment is {self.tt_rank_frac}")
-            
-        self.observation_space_shape = observation_space.shape
+        if self.svd_rank_frac:   print(f"SVD frac  = {self.svd_rank_frac}")
+        if self.tt_rank_frac:    print(f"TT  frac  = {self.tt_rank_frac}")
+        if self.gauss_filter:    print("Gaussian filter will be applied")
+        if self.laplace_filter:  print("Laplacian filter will be applied")
+
+        # ─── basic attrs ───────────────────────────────────────────────
+        self.device = device                       # итоговое устройство
+        self.hidden_size        = config["hidden_layer_size"]
+        self.memory_layer_size  = config["transformer"]["embed_dim"]
         self.max_episode_length = max_episode_length
+        self.observation_space_shape = observation_space.shape
 
-        # Observation encoder
-        if len(self.observation_space_shape) > 1:
-            # Case: visual observation is available
-            # Visual encoder made of 3 convolutional layers
-            self.conv1 = nn.Conv2d(observation_space.shape[0], 32, 8, 4,)
-            self.conv2 = nn.Conv2d(32, 64, 4, 2, 0)
-            self.conv3 = nn.Conv2d(64, 64, 3, 1, 0)
-            nn.init.orthogonal_(self.conv1.weight, np.sqrt(2))
-            nn.init.orthogonal_(self.conv2.weight, np.sqrt(2))
-            nn.init.orthogonal_(self.conv3.weight, np.sqrt(2))
-            # Compute output size of convolutional layers
-            self.conv_out_size = self.get_conv_output(observation_space.shape)
-            in_features_next_layer = self.conv_out_size
-        else:
-            # Case: vector observation is available
-            in_features_next_layer = observation_space.shape[0]
-        
-        # Hidden layer
-        self.lin_hidden = nn.Linear(in_features_next_layer, self.memory_layer_size)
+        # ─── 1. encoder (CPU) ──────────────────────────────────────────
+        if len(self.observation_space_shape) > 1:           # visual obs
+            self.conv1 = nn.Conv2d(observation_space.shape[0], 32, 8, 4, device='cpu')
+            self.conv2 = nn.Conv2d(32, 64, 4, 2, 0, device='cpu')
+            self.conv3 = nn.Conv2d(64, 64, 3, 1, 0, device='cpu')
+            for c in (self.conv1, self.conv2, self.conv3):
+                nn.init.orthogonal_(c.weight, np.sqrt(2))
+            self.conv_out_size = self._get_conv_output(observation_space.shape)
+            in_features = self.conv_out_size
+        else:                                              # vector obs
+            in_features = observation_space.shape[0]
+
+        # ─── 2. MLP & Transformer (CPU) ────────────────────────────────
+        self.lin_hidden = nn.Linear(in_features, self.memory_layer_size, device='cpu')
         nn.init.orthogonal_(self.lin_hidden.weight, np.sqrt(2))
 
-        # Transformer Blocks
-        self.transformer = Transformer(config["transformer"], self.memory_layer_size, self.max_episode_length)
+        self.transformer = Transformer(
+            config["transformer"],
+            self.memory_layer_size,
+            self.max_episode_length
+        ).cpu()                                            # ensure CPU
 
-        # Decouple policy from value
-        # Hidden layer of the policy
-        self.lin_policy = nn.Linear(self.memory_layer_size, self.hidden_size)
+        self.lin_policy = nn.Linear(self.memory_layer_size, self.hidden_size, device='cpu')
+        self.lin_value  = nn.Linear(self.memory_layer_size, self.hidden_size, device='cpu')
         nn.init.orthogonal_(self.lin_policy.weight, np.sqrt(2))
+        nn.init.orthogonal_(self.lin_value.weight,  np.sqrt(2))
 
-        # Hidden layer of the value function
-        self.lin_value = nn.Linear(self.memory_layer_size, self.hidden_size)
-        nn.init.orthogonal_(self.lin_value.weight, np.sqrt(2))
-
-        # Outputs / Model heads
-        # Policy (Multi-discrete categorical distribution)
         self.policy_branches = nn.ModuleList()
-        for num_actions in action_space_shape:
-            actor_branch = nn.Linear(in_features=self.hidden_size, out_features=num_actions)
-            nn.init.orthogonal_(actor_branch.weight, np.sqrt(0.01))
-            self.policy_branches.append(actor_branch)
-            
-        # Value function
-        self.value = nn.Linear(self.hidden_size, 1)
+        for n_act in action_space_shape:
+            head = nn.Linear(self.hidden_size, n_act, device='cpu')
+            nn.init.orthogonal_(head.weight, np.sqrt(0.01))
+            self.policy_branches.append(head)
+
+        self.value = nn.Linear(self.hidden_size, 1, device='cpu')
         nn.init.orthogonal_(self.value.weight, 1)
 
     def svd_low_rank_safe(self, x: torch.Tensor,
@@ -98,6 +87,52 @@ class ActorCriticModel(nn.Module):
         x_hat = (U * S.unsqueeze(-2)) @ Vh       # (M, D)
         return x_hat.reshape(orig_shape)
 
+    def tt_low_rank_safe(self, memory: torch.Tensor,
+                         energy_frac: float = 1.0,
+                         max_rank: int = 200) -> torch.Tensor:
+        """
+        TT-аппроксимация с удержанием заданной доли энергии.
+        Возвращает dense-тензор той же формы.
+        """
+        if energy_frac >= 1.0:
+            return memory                               # ничего не сжимаем
+    
+        shape = memory.shape
+        flat  = memory.reshape(-1, shape[-2], shape[-1])
+        full_norm = torch.linalg.norm(flat)
+    
+        for r in range(1, max_rank + 1):
+            mem_tt_r = tn.Tensor(flat, ranks_tt=r)      # построить TT ранга r
+            approx   = mem_tt_r.torch()
+            if torch.linalg.norm(approx) / full_norm >= energy_frac:
+                return approx.reshape_as(memory)
+
+        return approx.reshape_as(memory)
+
+    def apply_gaussian_filter(self, memory: torch.Tensor, sigma: float = 1.0) -> torch.Tensor:
+        """
+        Gaussian 1D-фильтр по последней размерности (D) → shape: (B, blocks, D)
+        """
+        B, blocks, D = memory.shape
+        kernel_size = int(torch.ceil(torch.tensor(6 * sigma))) | 1
+        half = (kernel_size - 1) // 2
+        x = torch.arange(-half, half + 1, dtype=memory.dtype, device=memory.device)
+        kernel = torch.exp(-0.5 * (x / sigma) ** 2)
+        kernel = (kernel / kernel.sum()).view(1, 1, -1)
+    
+        mem = memory.view(B * blocks, 1, D)                      # (B*blocks, 1, D)
+        smoothed = F.conv1d(mem, kernel, padding=half)
+        return smoothed.view(B, blocks, D)
+
+    def apply_laplacian_filter(self, memory: torch.Tensor) -> torch.Tensor:
+        """
+        Лаплас-фильтр по последней оси (фичи D).
+        Работает для памяти (B, blocks, D) и (B, L, blocks, D).
+        """
+        shift_left  = torch.roll(memory,  1, dims=-1)
+        shift_right = torch.roll(memory, -1, dims=-1)
+        laplacian = shift_left + shift_right - 2 * memory
+        return memory + laplacian
 
 
     def forward(self, obs:torch.tensor, memory:torch.tensor, memory_mask:torch.tensor, memory_indices:torch.tensor):
@@ -134,14 +169,16 @@ class ActorCriticModel(nn.Module):
         if self.svd_rank_frac is not None:
             approx = self.svd_low_rank_safe(memory, self.svd_rank_frac)
             memory = approx + (memory - approx).detach()
-        
-        elif self.tt_rank is not None:
-            # memory: (B, L, blocks, D) → TT по последним осям
-            shape = memory.shape
-            mem_tt = tn.Tensor(memory.reshape(-1, shape[-2], shape[-1]), ranks_tt=self.tt_rank)
-            approx = mem_tt.full().reshape_as(memory)
+
+        elif self.tt_rank_frac is not None:
+            approx = self.tt_low_rank_safe(memory, self.tt_rank_frac)
             memory = approx + (memory - approx).detach()
 
+        elif self.gauss_filter:
+            memory = self.apply_gaussian_filter(memory)
+
+        elif self.laplace_filter:
+            memory = self.apply_laplacian_filter(memory)
 
 
         # Decouple policy from value
@@ -156,19 +193,16 @@ class ActorCriticModel(nn.Module):
         
         return pi, value, memory
 
-    def get_conv_output(self, shape:tuple) -> int:
-        """Computes the output size of the convolutional layers by feeding a dummy tensor.
+    def _get_conv_output(self, shape: tuple) -> int:
+        dev = self.conv1.weight.device            # ← cpu
+        with torch.no_grad():
+            x = torch.zeros((1, *shape), device=dev)
+            x = self.conv1(x)
+            x = self.conv2(x)
+            x = self.conv3(x)
+        return int(np.prod(x.size()))
 
-        Arguments:
-            shape {tuple} -- Input shape of the data feeding the first convolutional layer
 
-        Returns:
-            {int} -- Number of output features returned by the utilized convolutional layers
-        """
-        o = self.conv1(torch.zeros(1, *shape))
-        o = self.conv2(o)
-        o = self.conv3(o)
-        return int(np.prod(o.size()))
     
     def get_grad_norm(self):
         """Returns the norm of the gradients of the model.

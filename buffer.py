@@ -27,24 +27,23 @@ class Buffer():
         self.embed_dim = config["transformer"]["embed_dim"]
 
         # Initialize the buffer's data storage
-        self.rewards = np.zeros((self.n_workers, self.worker_steps), dtype=np.float32)
-        self.actions = torch.zeros((self.n_workers, self.worker_steps, len(action_space_shape)), dtype=torch.long)
-        self.dones = np.zeros((self.n_workers, self.worker_steps), dtype=np.bool)
-        self.obs = torch.zeros((self.n_workers, self.worker_steps) + observation_space.shape)
-        self.log_probs = torch.zeros((self.n_workers, self.worker_steps, len(action_space_shape)))
-        self.values = torch.zeros((self.n_workers, self.worker_steps))
-        self.advantages = torch.zeros((self.n_workers, self.worker_steps))
+        self.rewards = torch.zeros((self.n_workers, self.worker_steps), dtype=torch.float32, device=self.device)
+        self.actions = torch.zeros((self.n_workers, self.worker_steps, len(action_space_shape)), dtype=torch.long, device=self.device)
+        self.dones = torch.zeros((self.n_workers, self.worker_steps), dtype=torch.bool, device=self.device)
+        self.obs = torch.zeros((self.n_workers, self.worker_steps) + observation_space.shape, device=self.device)
+        self.log_probs = torch.zeros((self.n_workers, self.worker_steps, len(action_space_shape)), device=self.device)
+        self.values = torch.zeros((self.n_workers, self.worker_steps), device=self.device)
+        self.advantages = torch.zeros((self.n_workers, self.worker_steps), device=self.device)
         # Episodic memory index buffer
         # Whole episode memories
         # The length of memories is equal to the number of sampled episodes during training data sampling
         # Each element is of shape (max_episode_length, num_blocks, embed_dim)
         self.memories = []
         # Memory mask used during attention
-        self.memory_mask = torch.zeros((self.n_workers, self.worker_steps, self.memory_length), dtype=torch.bool)
-        # Index to select the correct episode memory from self.memories
-        self.memory_index = torch.zeros((self.n_workers, self.worker_steps), dtype=torch.long)
-        # Indices to slice the memory window
-        self.memory_indices = torch.zeros((self.n_workers, self.worker_steps, self.memory_length), dtype=torch.long)
+        self.memory_mask = torch.zeros((self.n_workers, self.worker_steps, self.memory_length), dtype=torch.bool, device=self.device)
+        self.memory_index = torch.zeros((self.n_workers, self.worker_steps), dtype=torch.long, device=self.device)
+        self.memory_indices = torch.zeros((self.n_workers, self.worker_steps, self.memory_length), dtype=torch.long, device=self.device)
+
 
     def prepare_batch_dict(self) -> None:
         """Flattens the training samples and stores them inside a dictionary. Due to using a recurrent policy,
@@ -97,11 +96,11 @@ class Buffer():
         device = last_value.device
     
         with torch.no_grad():
-            # переносим всё на нужное устройство
             self.values = self.values.to(device)
             self.advantages = self.advantages.to(device)
-            rewards = torch.tensor(self.rewards, device=device)
-            mask = torch.tensor(self.dones, device=device).logical_not()
+            rewards = self.rewards.to(device)
+            mask = self.dones.logical_not().to(device)
+    
             last_advantage = 0
             for t in reversed(range(self.worker_steps)):
                 last_value = last_value * mask[:, t]
@@ -110,4 +109,5 @@ class Buffer():
                 last_advantage = delta + gamma * lamda * last_advantage
                 self.advantages[:, t] = last_advantage
                 last_value = self.values[:, t]
+
 

@@ -58,7 +58,7 @@ class PPOTrainer:
 
         # Init model
         print("Step 3: Init model and optimizer")
-        self.model = ActorCriticModel(self.config, observation_space, self.action_space_shape, self.max_episode_length).to(self.device)
+        self.model = ActorCriticModel(self.config, observation_space, self.action_space_shape, self.max_episode_length, self.device).to(self.device)
         self.model.train().to(self.device)
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.lr_schedule["initial"], foreach=False)
         torch.cuda.set_device(self.device) 
