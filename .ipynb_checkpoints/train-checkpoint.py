@@ -23,7 +23,7 @@ def main():
 
     # Determine the device to be used for training and set the default tensor type
     if not cpu:
-        device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
         if torch.cuda.is_available():
             torch.set_default_tensor_type("torch.cuda.FloatTensor")
     else:

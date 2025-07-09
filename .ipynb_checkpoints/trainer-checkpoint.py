@@ -122,7 +122,7 @@ class PPOTrainer:
             self.buffer.prepare_batch_dict()
 
             # Train epochs
-            training_stats, grad_info = self._train_epochs(learning_rate, clip_range, beta)
+            training_stats, grad_info, vae_mean = self._train_epochs(learning_rate, clip_range, beta)
             training_stats = np.mean(training_stats, axis=0)
 
             # Store recent episode infos
@@ -138,11 +138,18 @@ class PPOTrainer:
                 result = "{:4} reward={:.2f} std={:.2f} length={:.1f} std={:.2f} pi_loss={:3f} v_loss={:3f} entropy={:.3f} loss={:3f} value={:.3f} advantage={:.3f}".format(
                     update, episode_result["reward_mean"], episode_result["reward_std"], episode_result["length_mean"], episode_result["length_std"], 
                     training_stats[0], training_stats[1], training_stats[3], training_stats[2], torch.mean(self.buffer.values), torch.mean(self.buffer.advantages))
+
+            if vae_mean:
+                result += " vae_total={:.3f} recon={:.3f} kl={:.3f}".format(
+                    vae_mean["total"], vae_mean["recon"], vae_mean["kl"]
+                )
+
             print(result)
+
 
             # Write training statistics to tensorboard
             self._write_gradient_summary(update, grad_info)
-            self._write_training_summary(update, training_stats, episode_result)
+            self._write_training_summary(update, training_stats, episode_result, vae_mean)
             if update % self.config.get("video_every", 10) == 0:       # каждые 10 апдейтов
                 self._record_eval_episode(update)
 
@@ -181,15 +188,7 @@ class PPOTrainer:
                 sliced_memory = sliced_memory.to(self.device)
                 memory_mask = self.buffer.memory_mask[:, t].to(self.device)
                 memory_indices = self.buffer.memory_indices[:, t].to(self.device)
-                
-                # print("=== DEVICE CHECK ===")
-                # print("obs:", obs_tensor.device)
-                # print("sliced_memory:", sliced_memory.device)
-                # print("memory_mask:", memory_mask.device)
-                # print("memory_indices:", memory_indices.device)
-                # print("model on:", next(self.model.parameters()).device)
-                # print("target device:", self.device)
-                # print("====================")
+
                 
                 policy, value, memory = self.model(
                     obs_tensor,
@@ -283,24 +282,43 @@ class PPOTrainer:
         return last_value
 
 
-    def _train_epochs(self, learning_rate:float, clip_range:float, beta:float) -> list:
-        """Trains several PPO epochs over one batch of data while dividing the batch into mini batches.
-        
-        Arguments:
-            learning_rate {float} -- The current learning rate
-            clip_range {float} -- The current clip range
-            beta {float} -- The current entropy bonus coefficient
-            
-        Returns:
-            {tuple} -- Training and gradient statistics of one training epoch"""
+    def _train_epochs(self, learning_rate: float, clip_range: float, beta: float):
+        """
+        Несколько эпох PPO-обучения + аккуратный сбор VAE-метрик (если они есть).
+
+        Возвращает:
+            train_info   — список списков: [pi_loss, v_loss, total_loss, entropy, kl, clip_frac]
+            grad_info    — dict средних градиент-норм
+            vae_mean     — dict {'total':…, 'recon':…, 'kl':…}  или  None
+        """
         train_info, grad_info = [], {}
+        vae_accum = {"total": [], "recon": [], "kl": []}
+
         for _ in range(self.config["epochs"]):
-            mini_batch_generator = self.buffer.mini_batch_generator()
-            for mini_batch in mini_batch_generator:
-                train_info.append(self._train_mini_batch(mini_batch, learning_rate, clip_range, beta))
-                for key, value in self.model.get_grad_norm().items():
-                    grad_info.setdefault(key, []).append(value)
-        return train_info, grad_info
+            for mb in self.buffer.mini_batch_generator():
+                stats = self._train_mini_batch(mb, learning_rate, clip_range, beta)
+
+                # первые 6 элементов  —  обычные PPO-метрики
+                train_info.append(stats[:6])
+
+                # 7-й элемент — словарь VAE (при enable_vae) или None
+                if len(stats) > 6 and stats[6]:
+                    v = stats[6]
+                    vae_accum["total"].append(v["vae_total"].item())
+                    vae_accum["recon"].append(v["vae_recon"].item())
+                    vae_accum["kl"].append(v["vae_kl"].item())
+
+                # градиенты
+                for k, val in self.model.get_grad_norm().items():
+                    grad_info.setdefault(k, []).append(val)
+
+        # усредняем vae, если он был
+        vae_mean = None
+        if vae_accum["total"]:
+            vae_mean = {k: float(np.mean(v)) for k, v in vae_accum.items()}
+
+        return train_info, grad_info, vae_mean
+
         
     def _record_eval_episode(self, step: int) -> None:
         print(f"[eval] Recording evaluation gif for step {step}...")
@@ -406,33 +424,40 @@ class PPOTrainer:
         approx_kl = (ratio - 1.0) - log_ratio # http://joschu.net/blog/kl-approx.html
         clip_fraction = (abs((ratio - 1.0)) > clip_range).float().mean()
 
+        vae_stats = self.model.current_vae_stats if hasattr(self.model, "current_vae_stats") else None
+
         return [policy_loss.cpu().data.numpy(),
                 vf_loss.cpu().data.numpy(),
                 loss.cpu().data.numpy(),
                 entropy_bonus.cpu().data.numpy(),
                 approx_kl.mean().cpu().data.numpy(),
-                clip_fraction.cpu().data.numpy()]
+                clip_fraction.cpu().data.numpy(),
+                vae_stats]
 
-    def _write_training_summary(self, update, training_stats, episode_result) -> None:
-        """Writes to an event file based on the run-id argument.
-
-        Arguments:
-            update {int} -- Current PPO Update
-            training_stats {list} -- Statistics of the training algorithm
-            episode_result {dict} -- Statistics of completed episodes
-        """
+    def _write_training_summary(self, update, training_stats, episode_result, vae=None) -> None:
+        """Логирование в TensorBoard: PPO и (опционально) VAE."""
+        # эпизодическая статистика (reward, length и т.п.)
         if episode_result:
             for key in episode_result:
                 if "std" not in key:
-                    self.writer.add_scalar("episode/" + key, episode_result[key], update)
-        self.writer.add_scalar("losses/loss", training_stats[2], update)
-        self.writer.add_scalar("losses/policy_loss", training_stats[0], update)
-        self.writer.add_scalar("losses/value_loss", training_stats[1], update)
-        self.writer.add_scalar("losses/entropy", training_stats[3], update)
-        self.writer.add_scalar("training/value_mean", torch.mean(self.buffer.values), update)
+                    self.writer.add_scalar(f"episode/{key}", episode_result[key], update)
+
+        # стандартные потери PPO
+        self.writer.add_scalar("losses/loss",          training_stats[2], update)
+        self.writer.add_scalar("losses/policy_loss",   training_stats[0], update)
+        self.writer.add_scalar("losses/value_loss",    training_stats[1], update)
+        self.writer.add_scalar("losses/entropy",       training_stats[3], update)
+        self.writer.add_scalar("training/value_mean",  torch.mean(self.buffer.values),     update)
         self.writer.add_scalar("training/advantage_mean", torch.mean(self.buffer.advantages), update)
-        self.writer.add_scalar("other/clip_fraction", training_stats[4], update)
-        self.writer.add_scalar("other/kl", training_stats[5], update)
+        self.writer.add_scalar("other/clip_fraction",  training_stats[4], update)
+        self.writer.add_scalar("other/kl",             training_stats[5], update)
+
+        # если есть VAE — логируем его метрики
+        if vae:
+            self.writer.add_scalar("vae/total", vae["total"], update)
+            self.writer.add_scalar("vae/recon", vae["recon"], update)
+            self.writer.add_scalar("vae/kl",    vae["kl"],    update)
+
         
     def _write_gradient_summary(self, update, grad_info):
         """Adds gradient statistics to the tensorboard event file.

@@ -6,21 +6,25 @@ from torch import nn
 from torch.nn import functional as F
 import tntorch as tn
 from transformer import Transformer
+from vae import MemoryVAE
 
 class ActorCriticModel(nn.Module):
     def __init__(self, config, observation_space, action_space_shape, max_episode_length, device):
         super().__init__()
 
         # ─── experiment flags ──────────────────────────────────────────
-        self.svd_rank_frac = config.get("svd_rank_frac", None)
-        self.tt_rank_frac  = config.get("tt_rank_frac",  None)
-        self.gauss_filter  = config.get("gauss_filter", False)
-        self.laplace_filter = config.get("laplace_filter", False)
+        self.svd_rank_frac   = config.get("svd_rank_frac", None)
+        self.tt_rank_frac    = config.get("tt_rank_frac",  None)
+        self.gauss_filter    = config.get("gauss_filter", False)
+        self.laplace_filter  = config.get("laplace_filter", False)
+        self.enable_vae      = config.get("enable_vae", False)
 
         if self.svd_rank_frac:   print(f"SVD frac  = {self.svd_rank_frac}")
         if self.tt_rank_frac:    print(f"TT  frac  = {self.tt_rank_frac}")
         if self.gauss_filter:    print("Gaussian filter will be applied")
         if self.laplace_filter:  print("Laplacian filter will be applied")
+        if self.enable_vae:      print("VAE filter ENABLED")
+
 
         # ─── basic attrs ───────────────────────────────────────────────
         self.device = device                       # итоговое устройство
@@ -64,6 +68,13 @@ class ActorCriticModel(nn.Module):
 
         self.value = nn.Linear(self.hidden_size, 1, device='cpu')
         nn.init.orthogonal_(self.value.weight, 1)
+
+        if self.enable_vae:
+            self.vae = MemoryVAE(feature_dim=self.memory_layer_size,
+                                 latent_dim=config.get("vae_latent_dim", 64)).to('cpu')
+            self.vae_opt = torch.optim.Adam(self.vae.parameters(),
+                                            lr=config.get("vae_lr", 1e-4))
+            self.vae_beta = config.get("vae_beta", 0.001)   # вес KL
 
     def svd_low_rank_safe(self, x: torch.Tensor,
                           energy_frac: float = 1.0, max_try: int = 3) -> torch.Tensor:
@@ -180,6 +191,45 @@ class ActorCriticModel(nn.Module):
         elif self.laplace_filter:
             memory = self.apply_laplacian_filter(memory)
 
+        if self.enable_vae:
+            B, blocks, D = memory.shape
+            mem_flat = memory.reshape(-1, D).detach()
+
+            # нормализация перед VAE
+            mem_flat = F.layer_norm(mem_flat, mem_flat.shape[-1:])
+
+            # прогон через VAE
+            x_hat, mu, logvar = self.vae(mem_flat)
+
+            # вычисление лоссов
+            recon = F.mse_loss(x_hat, mem_flat, reduction='mean')
+            kl = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+
+            # β-аннейлинг
+            if self.training:
+                self.vae_beta = min(self.vae_beta + 1e-4, 0.01)
+
+            vae_loss = recon + self.vae_beta * kl
+
+            # шаг оптимизации
+            if self.training and torch.is_grad_enabled():
+                self.vae_opt.zero_grad()
+                vae_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.vae.parameters(), 1.0)
+                self.vae_opt.step()
+
+            # лог
+            self.current_vae_stats = {
+                "vae_total": vae_loss.detach(),
+                "vae_recon": recon.detach(),
+                "vae_kl":    kl.detach()
+            }
+
+            # перезапись памяти
+            memory = x_hat.detach().reshape_as(memory)
+
+
+
 
         # Decouple policy from value
         # Feed hidden layer (policy)
@@ -230,19 +280,16 @@ class ActorCriticModel(nn.Module):
         return grads
     
     def _calc_grad_norm(self, *modules):
-        """Computes the norm of the gradients of the given modules.
-
-        Arguments:
-            modules {list} -- List of modules to compute the norm of the gradients of.
-
-        Returns:
-            {float} -- Norm of the gradients of the given modules. 
-        """
+        """Norm of gradients for the given modules."""
         grads = []
         for module in modules:
-            for name, parameter in module.named_parameters():
-                grads.append(parameter.grad.view(-1))
-        return torch.linalg.norm(torch.cat(grads)).item() if len(grads) > 0 else None
+            for _, p in module.named_parameters():
+                if p.grad is not None:                 # <-- проверка
+                    grads.append(p.grad.view(-1))
+        if not grads:                                  # ничего нет
+            return None
+        return torch.linalg.norm(torch.cat(grads)).item()
+
 
     def init_memory(self, batch_size: int, device: torch.device) -> torch.Tensor:
         num_blocks = self.transformer.num_blocks
