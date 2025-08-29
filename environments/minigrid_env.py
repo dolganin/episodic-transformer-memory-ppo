@@ -12,8 +12,8 @@ class Minigrid:
 
         # Decrease the agent's view size to raise the agent's memory challenge
         if "Memory" in name:
-            view_size = 3
-            self.tile_size = 28
+            view_size = 7
+            self.tile_size = 12
             hw = view_size * self.tile_size
             self.max_episode_steps = 96
             self._action_space = spaces.Discrete(3)
@@ -21,7 +21,7 @@ class Minigrid:
             self._env = RGBImgPartialObsWrapper(self._env, tile_size=self.tile_size)
         else:
             view_size = 7
-            self.tile_size = 8
+            self.tile_size = 12
             hw = view_size * self.tile_size
             self.max_episode_steps = 64
             self._action_space = self._env.action_space
