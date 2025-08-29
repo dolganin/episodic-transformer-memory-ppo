@@ -17,8 +17,6 @@ fsspec==2025.5.1
 google-auth==1.35.0
 google-auth-oauthlib==0.4.6
 grpcio==1.73.1
-gym==0.18.3
-gym-minigrid==1.0.2
 gymnasium==0.29.0
 idna==3.10
 imageio==2.37.0
@@ -30,7 +28,6 @@ kiwisolver==1.4.7
 markdown==3.8.2
 MarkupSafe==3.0.2
 matplotlib==3.5.0
-memory-gym==1.0.2
 minigrid==3.0.0
 moviepy==1.0.3
 mpmath==1.3.0
@@ -84,3 +81,7 @@ typing-extensions==4.14.0
 urllib3==2.5.0
 werkzeug==3.1.3
 zipp==3.23.0
+shimmy==1.3.0
+gymnasium==0.29.0
+minigrid==3.0.0
+pillow
