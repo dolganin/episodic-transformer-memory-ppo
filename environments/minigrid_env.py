@@ -80,8 +80,8 @@ class Minigrid:
         self.t += 1
         return obs, reward, done, info
 
-    def render(self):
-        img = self._env.render(tile_size=96)
+    def render(self, tile_size=96):
+        img = self._env.render(tile_size=tile_size)
         time.sleep(0.5)
         return img
 
