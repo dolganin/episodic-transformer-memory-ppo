@@ -8,7 +8,7 @@ from minigrid.wrappers import RGBImgPartialObsWrapper, ViewSizeWrapper, ImgObsWr
 
 class Minigrid:
     def __init__(self, name: str):
-        self._env = gym.make(name)
+        self._env = gym.make(name, render_mode="rgb_array")
 
         # Decrease the agent's view size to raise the agent's memory challenge
         if "Memory" in name:
