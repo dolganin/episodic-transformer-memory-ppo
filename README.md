@@ -18,6 +18,8 @@ This repository features a PyTorch based implementation of PPO using Transformer
     - Visual Observation Space 3x84x84
     - Egocentric Agent View Size 3x3 (default 7x7)
     - Action Space: forward, rotate left, rotate right
+  - VizDoom
+    - Basic scenario
   - [MemoryGym](https://github.com/MarcoMeter/drl-memory-gym)
     - Mortar Mayhem
     - Mystery Path
@@ -83,6 +85,8 @@ The training is launched via `train.py`. `--config` specifies the path to the ya
 
 ```bash
 python train.py --config configs/minigrid.yaml --run-id=my-trxl-training
+# VizDoom example
+python train.py --config configs/vizdoom_basic.yaml --run-id=my-vizdoom-training
 ```
 
 # Enjoy a model
