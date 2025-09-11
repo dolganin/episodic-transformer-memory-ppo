@@ -109,52 +109,59 @@ class PPOTrainer:
         # Store episode results for monitoring statistics
         episode_infos = deque(maxlen=100)
 
-        for update in range(self.config["updates"]):
-            # Decay hyperparameters polynomially based on the provided config
-            learning_rate = polynomial_decay(self.lr_schedule["initial"], self.lr_schedule["final"], self.lr_schedule["max_decay_steps"], self.lr_schedule["power"], update)
-            beta = polynomial_decay(self.beta_schedule["initial"], self.beta_schedule["final"], self.beta_schedule["max_decay_steps"], self.beta_schedule["power"], update)
-            clip_range = polynomial_decay(self.cr_schedule["initial"], self.cr_schedule["final"], self.cr_schedule["max_decay_steps"], self.cr_schedule["power"], update)
+        try:
+            for update in range(self.config["updates"]):
+                # Decay hyperparameters polynomially based on the provided config
+                learning_rate = polynomial_decay(self.lr_schedule["initial"], self.lr_schedule["final"], self.lr_schedule["max_decay_steps"], self.lr_schedule["power"], update)
+                beta = polynomial_decay(self.beta_schedule["initial"], self.beta_schedule["final"], self.beta_schedule["max_decay_steps"], self.beta_schedule["power"], update)
+                clip_range = polynomial_decay(self.cr_schedule["initial"], self.cr_schedule["final"], self.cr_schedule["max_decay_steps"], self.cr_schedule["power"], update)
 
-            # Sample training data
-            sampled_episode_info = self._sample_training_data()
+                # Sample training data
+                sampled_episode_info = self._sample_training_data()
 
-            # Prepare the sampled data inside the buffer (splits data into sequences)
-            self.buffer.prepare_batch_dict()
+                # Prepare the sampled data inside the buffer (splits data into sequences)
+                self.buffer.prepare_batch_dict()
 
-            # Train epochs
-            training_stats, grad_info, vae_mean = self._train_epochs(learning_rate, clip_range, beta)
-            training_stats = np.mean(training_stats, axis=0)
+                # Train epochs
+                training_stats, grad_info, vae_mean = self._train_epochs(learning_rate, clip_range, beta)
+                training_stats = np.mean(training_stats, axis=0)
 
-            # Store recent episode infos
-            episode_infos.extend(sampled_episode_info)
-            episode_result = process_episode_info(episode_infos)
+                # Store recent episode infos
+                episode_infos.extend(sampled_episode_info)
+                episode_result = process_episode_info(episode_infos)
 
-            # Print training statistics
-            if "success" in episode_result:
-                result = "{:4} reward={:.2f} std={:.2f} length={:.1f} std={:.2f} success={:.2f} pi_loss={:3f} v_loss={:3f} entropy={:.3f} loss={:3f} value={:.3f} advantage={:.3f}".format(
-                    update, episode_result["reward_mean"], episode_result["reward_std"], episode_result["length_mean"], episode_result["length_std"], episode_result["success"],
-                    training_stats[0], training_stats[1], training_stats[3], training_stats[2], torch.mean(self.buffer.values), torch.mean(self.buffer.advantages))
-            else:
-                result = "{:4} reward={:.2f} std={:.2f} length={:.1f} std={:.2f} pi_loss={:3f} v_loss={:3f} entropy={:.3f} loss={:3f} value={:.3f} advantage={:.3f}".format(
-                    update, episode_result["reward_mean"], episode_result["reward_std"], episode_result["length_mean"], episode_result["length_std"], 
-                    training_stats[0], training_stats[1], training_stats[3], training_stats[2], torch.mean(self.buffer.values), torch.mean(self.buffer.advantages))
+                # Print training statistics
+                if "success" in episode_result:
+                    result = "{:4} reward={:.2f} std={:.2f} length={:.1f} std={:.2f} success={:.2f} pi_loss={:3f} v_loss={:3f} entropy={:.3f} loss={:3f} value={:.3f} advantage={:.3f}".format(
+                        update, episode_result["reward_mean"], episode_result["reward_std"], episode_result["length_mean"], episode_result["length_std"], episode_result["success"],
+                        training_stats[0], training_stats[1], training_stats[3], training_stats[2], torch.mean(self.buffer.values), torch.mean(self.buffer.advantages))
+                else:
+                    result = "{:4} reward={:.2f} std={:.2f} length={:.1f} std={:.2f} pi_loss={:3f} v_loss={:3f} entropy={:.3f} loss={:3f} value={:.3f} advantage={:.3f}".format(
+                        update, episode_result["reward_mean"], episode_result["reward_std"], episode_result["length_mean"], episode_result["length_std"],
+                        training_stats[0], training_stats[1], training_stats[3], training_stats[2], torch.mean(self.buffer.values), torch.mean(self.buffer.advantages))
 
-            if vae_mean:
-                result += " vae_total={:.3f} recon={:.3f} kl={:.3f}".format(
-                    vae_mean["total"], vae_mean["recon"], vae_mean["kl"]
-                )
+                if vae_mean:
+                    result += " vae_total={:.3f} recon={:.3f} kl={:.3f}".format(
+                        vae_mean["total"], vae_mean["recon"], vae_mean["kl"]
+                    )
 
-            print(result)
+                print(result)
 
 
-            # Write training statistics to tensorboard
-            self._write_gradient_summary(update, grad_info)
-            self._write_training_summary(update, training_stats, episode_result, vae_mean)
-            if update % self.config.get("video_every", 10) == 0:       # каждые 10 апдейтов
-                self._record_eval_episode(update)
-
-        # Save the trained model at the end of the training
-        self._save_model()
+                # Write training statistics to tensorboard
+                self._write_gradient_summary(update, grad_info)
+                self._write_training_summary(update, training_stats, episode_result, vae_mean)
+                if update % self.config.get("video_every", 10) == 0:       # каждые 10 апдейтов
+                    self._record_eval_episode(update)
+        except KeyboardInterrupt:
+            print("Training interrupted by user")
+        except torch.cuda.OutOfMemoryError:
+            print("CUDA Out Of Memory during training")
+            torch.cuda.empty_cache()
+        finally:
+            torch.cuda.empty_cache()
+            # Save the trained model at the end or upon interruption
+            self._save_model()
 
     def _sample_training_data(self) -> list:
         """Runs all n workers for n steps to sample training data.
@@ -320,48 +327,108 @@ class PPOTrainer:
         return train_info, grad_info, vae_mean
 
         
+    def _to_hwc_uint8(self, frame) -> np.ndarray:
+        """Normalize frame to HWC uint8 RGB."""
+        if torch.is_tensor(frame):
+            frame = frame.detach().cpu().numpy()
+        arr = np.asarray(frame)
+
+        # CHW -> HWC
+        if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[0] < arr.shape[1] and arr.shape[0] < arr.shape[2]:
+            arr = np.transpose(arr, (1, 2, 0))
+
+        # grayscale -> RGB
+        if arr.ndim == 2:
+            arr = np.repeat(arr[:, :, None], 3, axis=2)
+        elif arr.ndim == 3 and arr.shape[2] == 1:
+            arr = np.repeat(arr, 3, axis=2)
+        elif arr.ndim == 3 and arr.shape[2] > 3:
+            arr = arr[:, :, :3]
+
+        if arr.dtype != np.uint8:
+            arr = arr.astype(np.float32)
+            a_min, a_max = float(arr.min()), float(arr.max())
+            if 0.0 <= a_min and a_max <= 1.0:
+                arr = (arr * 255.0).round()
+            else:
+                rng = max(1e-6, a_max - a_min)
+                arr = ((arr - a_min) / rng * 255.0).round()
+            arr = arr.clip(0, 255).astype(np.uint8)
+
+        return arr
+
     def _record_eval_episode(self, step: int) -> None:
         print(f"[eval] Recording evaluation gif for step {step}...")
-    
-        old_n_workers = self.config["n_workers"]
-        self.config["n_workers"] = 1
-        env = create_env(self.config["environment"])
-        self.config["n_workers"] = old_n_workers
-    
-        frames, obs = [], env.reset()
-        obs = torch.tensor(obs).unsqueeze(0).to(self.device)        # (1, obs_dim)
-    
-        memory = self.model.init_memory(batch_size=1, device=self.device)         # (1, 1, blocks, dim)
-        memory_mask    = torch.ones((1, 1), dtype=torch.bool, device=self.device) # (1, 1)
-        memory_indices = torch.zeros((1, 1), dtype=torch.long, device=self.device)
-    
-        done, steps, max_steps = False, 0, 100
-        while not done and steps < max_steps:
-            with torch.no_grad():
-                policy, _, mem_step = self.model(            # mem_step: (1, blocks, dim)
-                    obs, memory, memory_mask, memory_indices
-                )
-                act = np.array([p.probs.argmax(-1).item() for p in policy])
-    
-            # ►► обновляем память по времени
-            memory = torch.cat([memory, mem_step.unsqueeze(1)], dim=1)  # (1, T+1, blocks, dim)
-    
-            # ►► строим согласованные mask и indices
-            T = memory.size(1)
-            memory_mask    = torch.ones((1, T), dtype=torch.bool, device=self.device)
-            memory_indices = torch.arange(T, device=self.device).unsqueeze(0)
-    
-            obs, _, done, _ = env.step(act)
-            obs = torch.tensor(obs).unsqueeze(0).to(self.device)
-    
-            frame = env.render()[::2, ::2]   # даунскейл
+        env = None
+        try:
+            old_n_workers = self.config["n_workers"]
+            self.config["n_workers"] = 1
+            env = create_env(self.config["environment"])
+            self.config["n_workers"] = old_n_workers
+
+            reset_out = env.reset()
+            obs = reset_out[0] if isinstance(reset_out, (tuple, list)) and len(reset_out) >= 1 else reset_out
+
+            frames = []
+            memory = self.model.init_memory(batch_size=1, device=self.device)
+            memory_mask = torch.ones((1, 1), dtype=torch.bool, device=self.device)
+            memory_indices = torch.zeros((1, 1), dtype=torch.long, device=self.device)
+
+            raw = env.render()
+            first = self._to_hwc_uint8(raw)
+            if self.config.get("downscale_eval_frames", True):
+                target_h, target_w = first.shape[0] // 2, first.shape[1] // 2
+            else:
+                target_h, target_w = first.shape[0], first.shape[1]
+            frame = first[:: first.shape[0] // target_h or 1, :: first.shape[1] // target_w or 1]
             frames.append(frame)
-            steps += 1
-    
-        env.close()
-        path = os.path.join(self.video_dir, f"step_{step:05d}.gif")
-        imageio.mimsave(path, frames, duration=1 / self.config.get("fps", 15))
-        print(f"[eval] Saved gif to {path}")
+
+            done, steps = False, 0
+            max_steps = int(self.config.get("eval_max_steps", 100))
+            while not done and steps < max_steps:
+                with torch.no_grad():
+                    obs_tensor = torch.tensor(obs).unsqueeze(0).to(self.device)
+                    policy, _, mem_step = self.model(obs_tensor, memory, memory_mask, memory_indices)
+                    act = np.array([p.probs.argmax(-1).item() for p in policy])
+
+                memory = torch.cat([memory, mem_step.unsqueeze(1)], dim=1)
+                T = memory.size(1)
+                memory_mask = torch.ones((1, T), dtype=torch.bool, device=self.device)
+                memory_indices = torch.arange(T, device=self.device).unsqueeze(0)
+
+                step_out = env.step(act)
+                if isinstance(step_out, (tuple, list)) and len(step_out) >= 4:
+                    obs = step_out[0]
+                    terminated = bool(step_out[2])
+                    truncated = bool(step_out[3])
+                    done = terminated or truncated
+                else:
+                    obs, _, done, _ = step_out
+
+                raw = env.render()
+                f = self._to_hwc_uint8(raw)
+                if f.shape[0] != target_h or f.shape[1] != target_w:
+                    f = f[:: max(1, f.shape[0] // target_h), :: max(1, f.shape[1] // target_w)]
+                    f = f[:target_h, :target_w]
+                frames.append(f)
+                steps += 1
+
+            env.close()
+            path = os.path.join(self.video_dir, f"step_{step:05d}.gif")
+            imageio.mimsave(path, frames, duration=1 / self.config.get("fps", 15))
+            print(f"[eval] Saved gif to {path}")
+        except KeyboardInterrupt:
+            print("[eval] Recording interrupted")
+        except torch.cuda.OutOfMemoryError:
+            print("[eval] CUDA Out Of Memory")
+            torch.cuda.empty_cache()
+        finally:
+            if env is not None:
+                try:
+                    env.close()
+                except Exception:
+                    pass
+            torch.cuda.empty_cache()
 
 
     def _train_mini_batch(self, samples:dict, learning_rate:float, clip_range:float, beta:float) -> list:
@@ -495,6 +562,6 @@ class PPOTrainer:
                 worker.child.send(("close", None))
         except:
             pass
-
+        torch.cuda.empty_cache()
         time.sleep(1.0)
         exit(0)

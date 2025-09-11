@@ -7,6 +7,7 @@ from environments.cartpole_env import CartPole
 from environments.memory_gym_env import MemoryGymWrapper
 from environments.minigrid_env import Minigrid
 from environments.poc_memory_env import PocMemoryEnv
+from environments.vizdoom_env import VizDoom
 
 def create_env(config:dict, render:bool=False):
     """Initializes an environment based on the provided environment name.
@@ -25,7 +26,9 @@ def create_env(config:dict, render:bool=False):
     if config["type"] == "CartPoleMasked":
         return CartPole(mask_velocity=True)
     if config["type"] == "Minigrid":
-        return Minigrid(config["name"])
+        return Minigrid(config)
+    if config["type"] == "VizDoom":
+        return VizDoom(config["name"])
     if config["type"] in ["SearingSpotlights", "MortarMayhem", "MortarMayhem-Grid", "MysteryPath", "MysteryPath-Grid"]:
         return MemoryGymWrapper(env_name = config["name"], reset_params=config["reset_params"], realtime_mode=render)
 
