@@ -1,8 +1,8 @@
 environment:
-    type: "Minigrid"
-    name: MiniGrid-MemoryS13-v0
-    view_size: 7
-    tile_size: 8
+    type: "VizDoom"
+    name: VizdoomBasic-v0
+    # scenario: "basic"            # optional VizDoom scenario
+    # resolution: [160, 120]       # optional [width, height]
 gamma: 0.995
 lamda: 0.95
 updates: 450
@@ -46,6 +46,6 @@ video_every: 10
 #gauss_filter: true        # или false
 #laplace_filter: true     # или true
 enable_vae: true
-vae_latent_dim: 32    
-vae_lr: 1e-5      
-vae_beta: 0.0           
+vae_latent_dim: 32
+vae_lr: 1e-5
+vae_beta: 0.0

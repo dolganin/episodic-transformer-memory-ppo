@@ -7,33 +7,35 @@ from minigrid.wrappers import RGBImgPartialObsWrapper, ViewSizeWrapper, ImgObsWr
 
 
 class Minigrid:
-    def __init__(self, name: str):
+    def __init__(self, config: dict):
+        """Create Minigrid environment with dynamic view and tile sizes."""
+        name = config["name"]
         self._env = gym.make(name, render_mode="rgb_array")
 
-        # Decrease the agent's view size to raise the agent's memory challenge
-        if "Memory" in name:
-            view_size = 7
-            self.tile_size = 12
-            hw = view_size * self.tile_size
-            self.max_episode_steps = 96
-            self._action_space = spaces.Discrete(3)
-            self._env = ViewSizeWrapper(self._env, view_size)
-            self._env = RGBImgPartialObsWrapper(self._env, tile_size=self.tile_size)
-        else:
-            view_size = 7
-            self.tile_size = 12
-            hw = view_size * self.tile_size
-            self.max_episode_steps = 64
-            self._action_space = self._env.action_space
-            self._env = ViewSizeWrapper(self._env, view_size)
-            self._env = RGBImgPartialObsWrapper(self._env, tile_size=self.tile_size)
+        # allow custom view_size / tile_size via config or env defaults
+        view_size = config.get("view_size", getattr(self._env.unwrapped, "agent_view_size", 7))
+        self.tile_size = config.get("tile_size", getattr(self._env.unwrapped, "tile_size", 8))
 
+        # max steps from env spec (fallback to 0)
+        self.max_episode_steps = getattr(self._env.spec, "max_episode_steps", 0)
+
+        # special-case memory tasks with restricted action space
+        if "Memory" in name:
+            self._action_space = spaces.Discrete(3)
+        else:
+            self._action_space = self._env.action_space
+
+        # apply wrappers for partial observations
+        self._env = ViewSizeWrapper(self._env, view_size)
+        self._env = RGBImgPartialObsWrapper(self._env, tile_size=self.tile_size)
         self._env = ImgObsWrapper(self._env)
 
+        # infer observation shape dynamically and convert to CHW
+        obs_shape = self._env.observation_space.shape  # (H, W, C)
         self._observation_space = spaces.Box(
             low=0,
             high=1.0,
-            shape=(3, hw, hw),
+            shape=(obs_shape[2], obs_shape[0], obs_shape[1]),
             dtype=np.float32,
         )
 
