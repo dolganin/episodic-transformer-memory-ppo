@@ -1,25 +1,34 @@
-import gymnasium as gym
 import numpy as np
-
 from gymnasium import spaces
 
 
 class VizDoom:
-    """Wrapper for VizDoom environments producing CHW float32 observations."""
+    """Minimal VizDoom wrapper yielding CHW float32 observations."""
 
-    def __init__(self, name: str):
-        self._env = gym.make(name, render_mode="rgb_array")
+    def __init__(self, config: dict):
+        import vizdoom as vzd
 
-        self._action_space = self._env.action_space
-        self.max_episode_steps = getattr(self._env.spec, "max_episode_steps", 0)
+        self.game = vzd.DoomGame()
+        if "config" in config:
+            self.game.load_config(config["config"])
+        if "scenario" in config:
+            self.game.set_doom_scenario_path(config["scenario"])
+        resolution = config.get("resolution")
+        if resolution is not None:
+            self.game.set_screen_resolution(getattr(vzd.ScreenResolution, resolution))
+        self.game.set_screen_format(vzd.ScreenFormat.RGB24)
+        self.game.init()
 
-        obs_shape = self._env.observation_space.shape  # (H, W, C)
-        self._observation_space = spaces.Box(
-            low=0,
-            high=1.0,
-            shape=(obs_shape[2], obs_shape[0], obs_shape[1]),
-            dtype=np.float32,
-        )
+        self.frame_skip = int(config.get("frame_skip", 1))
+        n_buttons = self.game.get_available_buttons_size()
+        self.actions = np.eye(n_buttons, dtype=np.uint8)
+
+        obs = self._get_obs()
+        self._observation_space = spaces.Box(low=0, high=1.0, shape=obs.shape, dtype=np.float32)
+        self._action_space = spaces.Discrete(len(self.actions))
+        self.max_episode_steps = self.game.get_episode_timeout() or 0
+        self.t = 0
+        self._rewards = []
 
     @property
     def observation_space(self):
@@ -29,46 +38,46 @@ class VizDoom:
     def action_space(self):
         return self._action_space
 
+    def _get_obs(self):
+        state = self.game.get_state()
+        if state is None:
+            shape = (self.game.get_screen_channels(), self.game.get_screen_height(), self.game.get_screen_width())
+            return np.zeros(shape, dtype=np.float32)
+        buf = state.screen_buffer
+        if buf.ndim == 3 and buf.shape[0] in (1, 3, 4):
+            arr = buf
+        else:
+            arr = np.transpose(buf, (2, 0, 1))
+        arr = arr.astype(np.float32)
+        if arr.max() > 1.0:
+            arr /= 255.0
+        return arr
+
     def reset(self):
-        seed = int(np.random.randint(0, 2**31 - 1))
-        obs, info = self._env.reset(seed=seed)
+        self.game.new_episode()
         self.t = 0
         self._rewards = []
-
-        obs = obs.astype(np.float32)
-        if obs.max() > 1.0:
-            obs /= 255.0
-        obs = np.transpose(obs, (2, 0, 1))  # HWC -> CHW
-        return obs
+        return self._get_obs()
 
     def step(self, action):
-        result = self._env.step(action[0]) if isinstance(action, (list, np.ndarray)) else self._env.step(action)
-        if len(result) == 5:
-            obs, reward, terminated, truncated, info = result
-            done = terminated or truncated
-        else:
-            obs, reward, done, info = result
-
+        reward = self.game.make_action(self.actions[int(action)].tolist(), self.frame_skip)
         self._rewards.append(reward)
-        obs = obs.astype(np.float32)
-        if obs.max() > 1.0:
-            obs /= 255.0
-        obs = np.transpose(obs, (2, 0, 1))
-
-        if self.t == self.max_episode_steps - 1:
-            done = True
-
-        if done:
-            info = {"reward": sum(self._rewards), "length": len(self._rewards)}
-        else:
-            info = None
-
+        done = self.game.is_episode_finished() or (self.max_episode_steps and self.t >= self.max_episode_steps - 1)
+        obs = self._get_obs() if not done else self._observation_space.low.copy()
+        info = {"reward": sum(self._rewards), "length": len(self._rewards)} if done else None
         self.t += 1
         return obs, reward, done, info
 
     def render(self):
-        return self._env.render()
+        state = self.game.get_state()
+        if state is None:
+            return np.zeros((self._observation_space.shape[1], self._observation_space.shape[2], 3), dtype=np.uint8)
+        buf = state.screen_buffer
+        if buf.ndim == 3 and buf.shape[0] in (1, 3, 4):
+            arr = np.transpose(buf, (1, 2, 0))
+        else:
+            arr = buf
+        return arr
 
     def close(self):
-        self._env.close()
-
+        self.game.close()

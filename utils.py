@@ -27,8 +27,8 @@ def create_env(config:dict, render:bool=False):
         return CartPole(mask_velocity=True)
     if config["type"] == "Minigrid":
         return Minigrid(config)
-    if config["type"] == "VizDoom":
-        return VizDoom(config["name"])
+    if config["type"].lower() == "vizdoom":
+        return VizDoom(config)
     if config["type"] in ["SearingSpotlights", "MortarMayhem", "MortarMayhem-Grid", "MysteryPath", "MysteryPath-Grid"]:
         return MemoryGymWrapper(env_name = config["name"], reset_params=config["reset_params"], realtime_mode=render)
 
